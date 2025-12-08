@@ -81,7 +81,7 @@ class ActivityCollectorMCPServer {
       return this.config!;
     } catch (error) {
       throw new Error(
-        'Configuration file not found. Please create ~/.timesheet-mcp-config.json with your API credentials.'
+        'Configuration file not found. Please create ~/.activity-collector-mcp-config.json with your API credentials.'
       );
     }
   }
