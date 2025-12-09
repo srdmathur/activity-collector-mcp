@@ -63,8 +63,15 @@ export class GitLabOAuth {
     });
 
     if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Failed to get GitLab access token: ${error}`);
+      let errorMessage = `HTTP ${response.status}`;
+      try {
+        const errorData = await response.json();
+        errorMessage = errorData.error_description || errorData.error || errorMessage;
+      } catch {
+        const errorText = await response.text();
+        if (errorText) errorMessage = errorText;
+      }
+      throw new Error(`Failed to get GitLab access token (${response.status}): ${errorMessage}`);
     }
 
     const tokens = (await response.json()) as GitLabOAuthTokens;

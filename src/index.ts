@@ -18,6 +18,7 @@ import { Config, DayActivity } from './types/index.js';
 import { runOAuthFlow } from './utils/oauthFlow.js';
 import { GitLabOAuth } from './utils/gitlabOAuth.js';
 import { BUNDLED_OAUTH_CREDENTIALS, OAUTH_SCOPES } from './config/oauth.js';
+import { OAuth2Client } from 'google-auth-library';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { homedir } from 'os';
@@ -336,8 +337,6 @@ Note: Use authenticate_google or authenticate_gitlab for easy setup!`;
 
   private async handleAuthenticateGoogle() {
     try {
-      await this.sendProgress('Starting Google Calendar authentication...');
-
       // Load config to check for custom OAuth credentials
       let clientId = BUNDLED_OAUTH_CREDENTIALS.google.clientId;
       let clientSecret = BUNDLED_OAUTH_CREDENTIALS.google.clientSecret;
@@ -347,21 +346,15 @@ Note: Use authenticate_google or authenticate_gitlab for easy setup!`;
         if (config.google?.clientId && config.google?.clientSecret) {
           clientId = config.google.clientId;
           clientSecret = config.google.clientSecret;
-          await this.sendProgress('Using custom OAuth credentials from config');
-        } else {
-          await this.sendProgress('Using bundled OAuth credentials');
         }
       } catch (error) {
         // Config file not found, use bundled credentials
-        await this.sendProgress('Using bundled OAuth credentials');
       }
 
       // Run OAuth flow with auto-capture
-      await this.sendProgress('Starting OAuth server...');
-
       const result = await runOAuthFlow((redirectUri) => {
         // Create OAuth2 client to generate auth URL
-        const tempOAuth2Client = new (require('google-auth-library').OAuth2)(
+        const tempOAuth2Client = new OAuth2Client(
           clientId,
           clientSecret,
           redirectUri
@@ -382,8 +375,6 @@ Note: Use authenticate_google or authenticate_gitlab for easy setup!`;
         throw new Error('No authorization code received');
       }
 
-      await this.sendProgress('Authorization code received, exchanging for tokens...');
-
       // Exchange code for tokens
       const redirectUri = `http://localhost:${result.port}/callback`;
       await this.googleCalendar.initialize(clientId, clientSecret, redirectUri);
@@ -392,7 +383,6 @@ Note: Use authenticate_google or authenticate_gitlab for easy setup!`;
       // Save tokens
       await this.tokenStorage.load();
       await this.tokenStorage.setGoogleTokens(tokens);
-      await this.sendProgress('Tokens saved successfully!');
 
       return {
         content: [
@@ -406,7 +396,6 @@ You can now use fetch_google_calendar_events to retrieve calendar data.`,
         ],
       };
     } catch (error: any) {
-      await this.sendProgress(`Authentication failed: ${error.message}`, 'error');
       return {
         content: [
           {
@@ -428,13 +417,9 @@ Please try again. If the problem persists, check that:
     try {
       const gitlabUrl = args?.gitlab_url || 'https://gitlab.com';
 
-      await this.sendProgress(`Starting GitLab authentication for ${gitlabUrl}...`);
-
       // Get OAuth credentials
       const applicationId = BUNDLED_OAUTH_CREDENTIALS.gitlab.applicationId;
       const secret = BUNDLED_OAUTH_CREDENTIALS.gitlab.secret;
-
-      await this.sendProgress('Using bundled OAuth credentials');
 
       // Create GitLab OAuth helper
       const gitlabOAuth = new GitLabOAuth({
@@ -444,8 +429,6 @@ Please try again. If the problem persists, check that:
       });
 
       // Run OAuth flow with auto-capture
-      await this.sendProgress('Starting OAuth server...');
-
       const result = await runOAuthFlow((redirectUri) => {
         return gitlabOAuth.getAuthUrl(redirectUri, OAUTH_SCOPES.gitlab.api);
       });
@@ -458,11 +441,14 @@ Please try again. If the problem persists, check that:
         throw new Error('No authorization code received');
       }
 
-      await this.sendProgress('Authorization code received, exchanging for tokens...');
-
       // Exchange code for tokens
       const redirectUri = `http://localhost:${result.port}/callback`;
-      const tokens = await gitlabOAuth.getTokenFromCode(result.code, redirectUri);
+      let tokens;
+      try {
+        tokens = await gitlabOAuth.getTokenFromCode(result.code, redirectUri);
+      } catch (tokenError: any) {
+        throw new Error(`Failed to exchange authorization code for tokens: ${tokenError.message}`);
+      }
 
       // Save tokens
       await this.tokenStorage.load();
@@ -472,7 +458,6 @@ Please try again. If the problem persists, check that:
         created_at: tokens.created_at,
         expires_in: tokens.expires_in,
       });
-      await this.sendProgress('Tokens saved successfully!');
 
       // Initialize GitLab integration
       await this.gitlab.initialize(tokens.access_token, gitlabUrl);
@@ -489,7 +474,6 @@ You can now use fetch_gitlab_activity to retrieve your GitLab activity.`,
         ],
       };
     } catch (error: any) {
-      await this.sendProgress(`Authentication failed: ${error.message}`, 'error');
       return {
         content: [
           {

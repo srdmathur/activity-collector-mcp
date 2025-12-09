@@ -22,8 +22,8 @@ async function openBrowser(url: string): Promise<void> {
       await execAsync(`xdg-open "${url}"`);
     }
   } catch (error) {
-    console.error('Failed to open browser automatically:', error);
-    console.log(`\nPlease open this URL manually in your browser:\n${url}\n`);
+    // Silently fail - browser will not open automatically
+    // User can still authorize via the OAuth page if they have it open
   }
 }
 
@@ -53,8 +53,6 @@ export async function runOAuthFlow(
       timeout: 300000, // 5 minutes
     });
 
-    console.log(`OAuth server started on port ${port}`);
-
     // Build redirect URI
     const redirectUri = `http://localhost:${port}/callback`;
 
@@ -62,13 +60,7 @@ export async function runOAuthFlow(
     const authUrl = authUrlBuilder(redirectUri);
 
     // Open browser
-    console.log('Opening browser for authentication...');
     await openBrowser(authUrl);
-
-    console.log('\nWaiting for authentication...');
-    console.log('If the browser did not open automatically, please visit:');
-    console.log(authUrl);
-    console.log('');
 
     // Wait for callback
     const result = await server.waitForCallback();
