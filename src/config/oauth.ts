@@ -13,8 +13,8 @@ export const BUNDLED_OAUTH_CREDENTIALS = {
     // Note: Redirect URIs are registered for ports 8080-8090
   },
   gitlab: {
-    applicationId: 'f1a23cb3b183591e8aa258b59315bdb1de58ecaa5af6ca024c15d70ee223e49e',
-    secret: 'gloas-0983f01857ece96523a6fee1e05f96d81df8bc009849e5d7e21ac2489e5a9d81',
+    applicationId: '219139e7ca5fc6bb8b77f614fa75548e718d686c43817d5b7c98d794a711987c',
+    secret: 'gloas-ef48ddc69957856808c611c048c4d3ef87646d4a6467b886b9b237174e6674d4',
     // Note: Redirect URIs are registered for ports 8080-8090
   },
 };
@@ -27,6 +27,6 @@ export const OAUTH_SCOPES = {
     calendar: ['https://www.googleapis.com/auth/calendar.readonly'],
   },
   gitlab: {
-    api: ['read_api'], // Read-only access to user's data and API
+    api: ['read_api', 'read_user'], // Read-only access to user's data and API, plus user profile
   },
 };

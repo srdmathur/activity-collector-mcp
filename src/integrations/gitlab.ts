@@ -4,23 +4,50 @@ import { GitLabActivity } from '../types/index.js';
 export class GitLabIntegration {
   private client: InstanceType<typeof Gitlab> | null = null;
   private userId: number | null = null;
+  private token: string = '';
+  private gitlabUrl: string = '';
   public debugInfo: any = null; // For debugging API responses
 
   async initialize(token: string, gitlabUrl: string = 'https://gitlab.com'): Promise<void> {
+    this.token = token;
+    this.gitlabUrl = gitlabUrl;
+
+    // Use oauthToken for OAuth tokens (bearer), token for personal access tokens
+    const isOAuthToken = !token.startsWith('glpat-') && !token.startsWith('glp');
     this.client = new Gitlab({
-      token,
       host: gitlabUrl,
+      ...(isOAuthToken ? { oauthToken: token } : { token }),
     });
 
-    // Get current user ID
-    const user = await this.client.Users.showCurrentUser();
-    this.userId = user.id;
+    // Lazy load user ID - will be fetched when needed
+    this.userId = null;
+  }
+
+  private async ensureUserId(): Promise<void> {
+    if (this.userId !== null) {
+      return;
+    }
+
+    if (!this.client) {
+      throw new Error('GitLab client not initialized');
+    }
+
+    try {
+      // Use Gitbeaker's Users.showCurrentUser() which handles OAuth/PAT tokens correctly
+      const user = await this.client.Users.showCurrentUser();
+      this.userId = user.id;
+    } catch (error: any) {
+      throw new Error(`Failed to get GitLab user info: ${error.message}. Make sure your token has the required permissions (read_user or read_api scope).`);
+    }
   }
 
   async getActivityForDate(dateStr: string): Promise<GitLabActivity> {
-    if (!this.client || !this.userId) {
+    if (!this.client) {
       throw new Error('GitLab client not initialized');
     }
+
+    // Ensure we have the user ID before fetching activity
+    await this.ensureUserId();
 
     // Validate YYYY-MM-DD format
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {

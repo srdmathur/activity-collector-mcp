@@ -1,6 +1,6 @@
 {
   "name": "activity-collector-mcp",
-  "version": "1.1.1",
+  "version": "1.2.2",
   "description": "MCP server for collecting activity data from GitLab, GitHub, and Calendar services",
   "type": "module",
   "main": "build/index.js",

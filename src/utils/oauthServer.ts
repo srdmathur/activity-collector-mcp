@@ -22,6 +22,7 @@ export class OAuthServer {
   private port: number | null = null;
   private callbackPromise: Promise<OAuthCallbackResult> | null = null;
   private callbackResolve: ((result: OAuthCallbackResult) => void) | null = null;
+  private connections: Set<any> = new Set();
 
   /**
    * Start the OAuth callback server
@@ -85,13 +86,19 @@ export class OAuthServer {
    */
   async stop(): Promise<void> {
     if (this.server) {
+      // Force-close all connections
+      for (const conn of this.connections) {
+        conn.destroy();
+      }
+      this.connections.clear();
+
       return new Promise((resolve, reject) => {
         this.server!.close((err) => {
+          this.server = null;
+          this.port = null;
           if (err) reject(err);
           else resolve();
         });
-        this.server = null;
-        this.port = null;
       });
     }
   }
@@ -112,6 +119,14 @@ export class OAuthServer {
         this.handleRequest(req, res);
       });
 
+      // Track all connections so we can force-close them
+      this.server.on('connection', (conn) => {
+        this.connections.add(conn);
+        conn.on('close', () => {
+          this.connections.delete(conn);
+        });
+      });
+
       this.server.on('error', (err: any) => {
         if (err.code === 'EADDRINUSE') {
           reject(new Error(`Port ${port} is already in use`));
@@ -130,7 +145,7 @@ export class OAuthServer {
    * Handle incoming HTTP requests
    */
   private handleRequest(req: IncomingMessage, res: ServerResponse): void {
-    if (!req.url) {
+    if (!req.url || !this.port) {
       this.sendResponse(res, 400, 'Bad Request');
       return;
     }
@@ -159,7 +174,10 @@ export class OAuthServer {
       );
 
       if (this.callbackResolve) {
-        this.callbackResolve({ error, state: state || undefined });
+        // Delay to ensure response is fully sent before server closes
+        setTimeout(() => {
+          this.callbackResolve!({ error, state: state || undefined });
+        }, 500);
       }
     } else if (code) {
       // Success
@@ -171,7 +189,10 @@ export class OAuthServer {
       );
 
       if (this.callbackResolve) {
-        this.callbackResolve({ code, state: state || undefined });
+        // Delay to ensure response is fully sent before server closes
+        setTimeout(() => {
+          this.callbackResolve!({ code, state: state || undefined });
+        }, 500);
       }
     } else {
       // Missing parameters
@@ -183,7 +204,10 @@ export class OAuthServer {
       );
 
       if (this.callbackResolve) {
-        this.callbackResolve({ error: 'missing_code' });
+        // Delay to ensure response is fully sent before server closes
+        setTimeout(() => {
+          this.callbackResolve!({ error: 'missing_code' });
+        }, 500);
       }
     }
   }

@@ -63,15 +63,32 @@ export class GitLabOAuth {
     });
 
     if (!response.ok) {
-      let errorMessage = `HTTP ${response.status}`;
+      let errorInfo = {
+        status: response.status,
+        statusText: response.statusText,
+        error: '',
+        error_description: '',
+        redirectUri,
+      };
+
       try {
         const errorData = await response.json();
-        errorMessage = errorData.error_description || errorData.error || errorMessage;
+        errorInfo.error = errorData.error || '';
+        errorInfo.error_description = errorData.error_description || '';
       } catch {
         const errorText = await response.text();
-        if (errorText) errorMessage = errorText;
+        errorInfo.error_description = errorText;
       }
-      throw new Error(`Failed to get GitLab access token (${response.status}): ${errorMessage}`);
+
+      const errorMessage = errorInfo.error_description || errorInfo.error || `HTTP ${response.status} ${response.statusText}`;
+      throw new Error(`GitLab token exchange failed (${response.status}): ${errorMessage}
+
+Debug Info:
+- Status: ${response.status} ${response.statusText}
+- Error: ${errorInfo.error || 'N/A'}
+- Description: ${errorInfo.error_description || 'N/A'}
+- Redirect URI used: ${redirectUri}
+- GitLab URL: ${this.gitlabUrl}`);
     }
 
     const tokens = (await response.json()) as GitLabOAuthTokens;

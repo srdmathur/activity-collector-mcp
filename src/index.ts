@@ -125,16 +125,34 @@ class ActivityCollectorMCPServer {
           },
         },
         {
-          name: 'authenticate_google',
-          description: 'Authenticate with Google Calendar using automated OAuth flow. Opens browser automatically, captures authorization, and saves tokens. No manual code copying needed!',
+          name: 'start_google_auth',
+          description: 'Step 1: Start Google Calendar OAuth authentication. Opens browser and returns authorization code. Fast and reliable.',
           inputSchema: {
             type: 'object',
             properties: {},
           },
         },
         {
-          name: 'authenticate_gitlab',
-          description: 'Authenticate with GitLab using automated OAuth flow. Opens browser automatically, captures authorization, and saves tokens. No manual code copying needed!',
+          name: 'complete_google_auth',
+          description: 'Step 2: Complete Google Calendar authentication by exchanging authorization code for tokens. Call this immediately after start_google_auth.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              code: {
+                type: 'string',
+                description: 'Authorization code from start_google_auth',
+              },
+              redirect_uri: {
+                type: 'string',
+                description: 'Redirect URI from start_google_auth (e.g., "http://localhost:8080/callback")',
+              },
+            },
+            required: ['code', 'redirect_uri'],
+          },
+        },
+        {
+          name: 'start_gitlab_auth',
+          description: 'Step 1: Start GitLab OAuth authentication. Opens browser and returns authorization code. Fast and reliable.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -143,6 +161,28 @@ class ActivityCollectorMCPServer {
                 description: 'GitLab instance URL (optional, defaults to https://gitlab.com)',
               },
             },
+          },
+        },
+        {
+          name: 'complete_gitlab_auth',
+          description: 'Step 2: Complete GitLab authentication by exchanging authorization code for tokens. Call this immediately after start_gitlab_auth.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              code: {
+                type: 'string',
+                description: 'Authorization code from start_gitlab_auth',
+              },
+              redirect_uri: {
+                type: 'string',
+                description: 'Redirect URI from start_gitlab_auth (e.g., "http://localhost:8080/callback")',
+              },
+              gitlab_url: {
+                type: 'string',
+                description: 'GitLab instance URL (optional, defaults to https://gitlab.com)',
+              },
+            },
+            required: ['code', 'redirect_uri'],
           },
         },
         {
@@ -272,11 +312,17 @@ class ActivityCollectorMCPServer {
           case 'check_authentication_status':
             return await this.handleCheckAuthStatus();
 
-          case 'authenticate_google':
-            return await this.handleAuthenticateGoogle();
+          case 'start_google_auth':
+            return await this.handleStartGoogleAuth();
 
-          case 'authenticate_gitlab':
-            return await this.handleAuthenticateGitLab(request.params.arguments);
+          case 'complete_google_auth':
+            return await this.handleCompleteGoogleAuth(request.params.arguments);
+
+          case 'start_gitlab_auth':
+            return await this.handleStartGitLabAuth(request.params.arguments);
+
+          case 'complete_gitlab_auth':
+            return await this.handleCompleteGitLabAuth(request.params.arguments);
 
           case 'fetch_gitlab_activity':
             return await this.handleFetchGitLabActivity(request.params.arguments);
@@ -335,7 +381,7 @@ Note: Use authenticate_google or authenticate_gitlab for easy setup!`;
     };
   }
 
-  private async handleAuthenticateGoogle() {
+  private async handleStartGoogleAuth() {
     try {
       // Load config to check for custom OAuth credentials
       let clientId = BUNDLED_OAUTH_CREDENTIALS.google.clientId;
@@ -351,7 +397,7 @@ Note: Use authenticate_google or authenticate_gitlab for easy setup!`;
         // Config file not found, use bundled credentials
       }
 
-      // Run OAuth flow with auto-capture
+      // Run OAuth flow - only capture authorization code
       const result = await runOAuthFlow((redirectUri) => {
         // Create OAuth2 client to generate auth URL
         const tempOAuth2Client = new OAuth2Client(
@@ -375,23 +421,18 @@ Note: Use authenticate_google or authenticate_gitlab for easy setup!`;
         throw new Error('No authorization code received');
       }
 
-      // Exchange code for tokens
       const redirectUri = `http://localhost:${result.port}/callback`;
-      await this.googleCalendar.initialize(clientId, clientSecret, redirectUri);
-      const tokens = await this.googleCalendar.setAuthorizationCode(result.code);
-
-      // Save tokens
-      await this.tokenStorage.load();
-      await this.tokenStorage.setGoogleTokens(tokens);
 
       return {
         content: [
           {
             type: 'text',
-            text: `✅ Successfully authenticated with Google Calendar!
+            text: `✅ Step 1 Complete: Authorization code received!
 
-Your access token has been saved and will be automatically refreshed when needed.
-You can now use fetch_google_calendar_events to retrieve calendar data.`,
+Authorization Code: ${result.code}
+Redirect URI: ${redirectUri}
+
+Next step: Call complete_google_auth with these values to finish authentication.`,
           },
         ],
       };
@@ -400,7 +441,7 @@ You can now use fetch_google_calendar_events to retrieve calendar data.`,
         content: [
           {
             type: 'text',
-            text: `❌ Google Calendar authentication failed: ${error.message}
+            text: `❌ Google Calendar authorization failed: ${error.message}
 
 Please try again. If the problem persists, check that:
 1. Your browser allows opening localhost URLs
@@ -413,7 +454,67 @@ Please try again. If the problem persists, check that:
     }
   }
 
-  private async handleAuthenticateGitLab(args: any) {
+  private async handleCompleteGoogleAuth(args: any) {
+    try {
+      const code = args?.code;
+      const redirectUri = args?.redirect_uri;
+
+      if (!code) {
+        throw new Error('Missing required parameter: code');
+      }
+      if (!redirectUri) {
+        throw new Error('Missing required parameter: redirect_uri');
+      }
+
+      // Load config to check for custom OAuth credentials
+      let clientId = BUNDLED_OAUTH_CREDENTIALS.google.clientId;
+      let clientSecret = BUNDLED_OAUTH_CREDENTIALS.google.clientSecret;
+
+      try {
+        const config = await this.loadConfig();
+        if (config.google?.clientId && config.google?.clientSecret) {
+          clientId = config.google.clientId;
+          clientSecret = config.google.clientSecret;
+        }
+      } catch (error) {
+        // Config file not found, use bundled credentials
+      }
+
+      // Exchange code for tokens
+      await this.googleCalendar.initialize(clientId, clientSecret, redirectUri);
+      const tokens = await this.googleCalendar.setAuthorizationCode(code);
+
+      // Save tokens
+      await this.tokenStorage.load();
+      await this.tokenStorage.setGoogleTokens(tokens);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `✅ Step 2 Complete: Successfully authenticated with Google Calendar!
+
+Your access token has been saved and will be automatically refreshed when needed.
+You can now use fetch_google_calendar_events to retrieve calendar data.`,
+          },
+        ],
+      };
+    } catch (error: any) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `❌ Failed to complete Google Calendar authentication: ${error.message}
+
+Please make sure you provided the correct authorization code and redirect URI from start_google_auth.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+
+  private async handleStartGitLabAuth(args: any) {
     try {
       const gitlabUrl = args?.gitlab_url || 'https://gitlab.com';
 
@@ -428,7 +529,7 @@ Please try again. If the problem persists, check that:
         gitlabUrl,
       });
 
-      // Run OAuth flow with auto-capture
+      // Run OAuth flow - only capture authorization code
       const result = await runOAuthFlow((redirectUri) => {
         return gitlabOAuth.getAuthUrl(redirectUri, OAUTH_SCOPES.gitlab.api);
       });
@@ -441,14 +542,66 @@ Please try again. If the problem persists, check that:
         throw new Error('No authorization code received');
       }
 
-      // Exchange code for tokens
       const redirectUri = `http://localhost:${result.port}/callback`;
-      let tokens;
-      try {
-        tokens = await gitlabOAuth.getTokenFromCode(result.code, redirectUri);
-      } catch (tokenError: any) {
-        throw new Error(`Failed to exchange authorization code for tokens: ${tokenError.message}`);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `✅ Step 1 Complete: Authorization code received!
+
+Authorization Code: ${result.code}
+Redirect URI: ${redirectUri}
+GitLab URL: ${gitlabUrl}
+
+Next step: Call complete_gitlab_auth with these values to finish authentication.`,
+          },
+        ],
+      };
+    } catch (error: any) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `❌ GitLab authorization failed: ${error.message}
+
+Troubleshooting:
+1. Make sure you clicked "Authorize" in the browser
+2. Check that ports 8080-8090 are not blocked by firewall
+3. Verify the GitLab URL is correct: ${args?.gitlab_url || 'https://gitlab.com'}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+
+  private async handleCompleteGitLabAuth(args: any) {
+    try {
+      const code = args?.code;
+      const redirectUri = args?.redirect_uri;
+      const gitlabUrl = args?.gitlab_url || 'https://gitlab.com';
+
+      if (!code) {
+        throw new Error('Missing required parameter: code');
       }
+      if (!redirectUri) {
+        throw new Error('Missing required parameter: redirect_uri');
+      }
+
+      // Get OAuth credentials
+      const applicationId = BUNDLED_OAUTH_CREDENTIALS.gitlab.applicationId;
+      const secret = BUNDLED_OAUTH_CREDENTIALS.gitlab.secret;
+
+      // Create GitLab OAuth helper
+      const gitlabOAuth = new GitLabOAuth({
+        applicationId,
+        secret,
+        gitlabUrl,
+      });
+
+      // Exchange code for tokens
+      const tokens = await gitlabOAuth.getTokenFromCode(code, redirectUri);
 
       // Save tokens
       await this.tokenStorage.load();
@@ -459,17 +612,18 @@ Please try again. If the problem persists, check that:
         expires_in: tokens.expires_in,
       });
 
-      // Initialize GitLab integration
-      await this.gitlab.initialize(tokens.access_token, gitlabUrl);
-
       return {
         content: [
           {
             type: 'text',
-            text: `✅ Successfully authenticated with GitLab (${gitlabUrl})!
+            text: `✅ Step 2 Complete: Successfully authenticated with GitLab (${gitlabUrl})!
 
 Your access token has been saved and will be automatically refreshed when needed.
-You can now use fetch_gitlab_activity to retrieve your GitLab activity.`,
+You can now use fetch_gitlab_activity to retrieve your GitLab activity.
+
+Token info:
+- Access token saved: ${tokens.access_token.substring(0, 8)}...
+- Expires in: ${tokens.expires_in ? `${tokens.expires_in / 3600} hours` : 'N/A'}`,
           },
         ],
       };
@@ -478,13 +632,11 @@ You can now use fetch_gitlab_activity to retrieve your GitLab activity.`,
         content: [
           {
             type: 'text',
-            text: `❌ GitLab authentication failed: ${error.message}
+            text: `❌ Failed to complete GitLab authentication: ${error.message}
 
-Please try again. If the problem persists, check that:
-1. Your browser allows opening localhost URLs
-2. Ports 8080-8090 are not all blocked by firewall
-3. You authorized the application in the browser
-4. The GitLab URL is correct (${args?.gitlab_url || 'https://gitlab.com'})`,
+Please make sure you provided the correct authorization code, redirect URI, and GitLab URL from start_gitlab_auth.
+
+If the error mentions "redirect_uri_mismatch", the OAuth app may need to be reconfigured.`,
           },
         ],
         isError: true,
@@ -976,26 +1128,25 @@ ${dateEntries}${debugText}`,
   private async handleFetchGoogleCalendarEvents(args: any) {
     await this.tokenStorage.load();
     await this.activityCache.load();
-    const config = await this.loadConfig();
 
     const googleTokens = this.tokenStorage.getGoogleTokens();
-    if (!googleTokens || !config.google) {
-      throw new Error('Google Calendar not configured. Please use configure_google_calendar tool first.');
+    if (!googleTokens) {
+      throw new Error('Google Calendar not configured. Please use authenticate_google tool first.');
     }
 
     // Check if date range is provided
     if (args.start_date && args.end_date) {
       // Handle date range
-      return this.handleFetchGoogleCalendarEventsRange(args, config, googleTokens);
+      return this.handleFetchGoogleCalendarEventsRange(args, googleTokens);
     } else if (args.date) {
       // Handle single date
-      return this.handleFetchGoogleCalendarEventsSingle(args, config, googleTokens);
+      return this.handleFetchGoogleCalendarEventsSingle(args, googleTokens);
     } else {
       throw new Error('Either date OR start_date+end_date must be provided');
     }
   }
 
-  private async handleFetchGoogleCalendarEventsSingle(args: any, config: any, googleTokens: any) {
+  private async handleFetchGoogleCalendarEventsSingle(args: any, googleTokens: any) {
     // Validate date format
     const dateStr = args.date;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
@@ -1003,9 +1154,9 @@ ${dateEntries}${debugText}`,
     }
 
     await this.googleCalendar.initialize(
-      config.google.clientId,
-      config.google.clientSecret,
-      config.google.redirectUri,
+      BUNDLED_OAUTH_CREDENTIALS.google.clientId,
+      BUNDLED_OAUTH_CREDENTIALS.google.clientSecret,
+      'http://localhost:8080/callback', // redirectUri not used for token refresh
       googleTokens,
       async (refreshedTokens) => {
         await this.tokenStorage.setGoogleTokens(refreshedTokens);
@@ -1034,7 +1185,7 @@ ${eventsText}`,
     };
   }
 
-  private async handleFetchGoogleCalendarEventsRange(args: any, config: any, googleTokens: any) {
+  private async handleFetchGoogleCalendarEventsRange(args: any, googleTokens: any) {
     // Validate date formats
     const startDateStr = args.start_date;
     const endDateStr = args.end_date;
@@ -1054,9 +1205,9 @@ ${eventsText}`,
     }
 
     await this.googleCalendar.initialize(
-      config.google.clientId,
-      config.google.clientSecret,
-      config.google.redirectUri,
+      BUNDLED_OAUTH_CREDENTIALS.google.clientId,
+      BUNDLED_OAUTH_CREDENTIALS.google.clientSecret,
+      'http://localhost:8080/callback', // redirectUri not used for token refresh
       googleTokens,
       async (refreshedTokens) => {
         await this.tokenStorage.setGoogleTokens(refreshedTokens);
