@@ -1,5 +1,10 @@
 export interface TokenStore {
-  gitlab?: string;
+  gitlab?: string | {
+    access_token: string;
+    refresh_token: string;
+    created_at: number;
+    expires_in?: number;
+  };
   github?: string;
   google?: {
     access_token: string;

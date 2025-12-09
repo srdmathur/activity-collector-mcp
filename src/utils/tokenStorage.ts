@@ -25,11 +25,31 @@ export class TokenStorage {
   }
 
   getGitLabToken(): string | undefined {
+    const gitlab = this.tokens.gitlab;
+    if (typeof gitlab === 'string') {
+      return gitlab;
+    } else if (gitlab && typeof gitlab === 'object') {
+      return gitlab.access_token;
+    }
+    return undefined;
+  }
+
+  getGitLabOAuthTokens(): TokenStore['gitlab'] | undefined {
     return this.tokens.gitlab;
   }
 
   async setGitLabToken(token: string): Promise<void> {
     this.tokens.gitlab = token;
+    await this.save();
+  }
+
+  async setGitLabOAuthTokens(tokens: {
+    access_token: string;
+    refresh_token: string;
+    created_at: number;
+    expires_in?: number;
+  }): Promise<void> {
+    this.tokens.gitlab = tokens;
     await this.save();
   }
 

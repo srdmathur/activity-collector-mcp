@@ -15,6 +15,9 @@ import { OutlookCalendarIntegration } from './integrations/outlookCalendar.js';
 import { TokenStorage } from './utils/tokenStorage.js';
 import { ActivityCache } from './utils/cache.js';
 import { Config, DayActivity } from './types/index.js';
+import { runOAuthFlow } from './utils/oauthFlow.js';
+import { GitLabOAuth } from './utils/gitlabOAuth.js';
+import { BUNDLED_OAUTH_CREDENTIALS, OAUTH_SCOPES } from './config/oauth.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { homedir } from 'os';
@@ -78,99 +81,67 @@ class ActivityCollectorMCPServer {
     try {
       const data = await fs.readFile(CONFIG_FILE, 'utf-8');
       this.config = JSON.parse(data);
-      return this.config!;
     } catch (error) {
-      throw new Error(
-        'Configuration file not found. Please create ~/.activity-collector-mcp-config.json with your API credentials.'
-      );
+      // Config file is optional - use defaults and bundled OAuth credentials
+      this.config = {};
     }
+
+    return this.config!;
   }
 
   private setupHandlers() {
     this.server.setRequestHandler(ListToolsRequestSchema, async () => {
       const tools: Tool[] = [
-        {
-          name: 'configure_gitlab',
-          description: 'Configure GitLab integration by providing a personal access token.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              token: {
-                type: 'string',
-                description: 'GitLab personal access token',
-              },
-              url: {
-                type: 'string',
-                description: 'GitLab instance URL (default: https://gitlab.com)',
-              },
-            },
-            required: ['token'],
-          },
-        },
-        {
-          name: 'configure_github',
-          description: 'Configure GitHub integration by providing a personal access token.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              token: {
-                type: 'string',
-                description: 'GitHub personal access token',
-              },
-            },
-            required: ['token'],
-          },
-        },
-        {
-          name: 'configure_google_calendar',
-          description: 'Start Google Calendar OAuth flow. Returns authorization URL.',
-          inputSchema: {
-            type: 'object',
-            properties: {},
-          },
-        },
-        {
-          name: 'google_calendar_callback',
-          description: 'Complete Google Calendar OAuth flow with authorization code.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              code: {
-                type: 'string',
-                description: 'Authorization code from OAuth callback',
-              },
-            },
-            required: ['code'],
-          },
-        },
-        {
-          name: 'configure_outlook_calendar',
-          description: 'Start Outlook Calendar OAuth flow. Returns authorization URL.',
-          inputSchema: {
-            type: 'object',
-            properties: {},
-          },
-        },
-        {
-          name: 'outlook_calendar_callback',
-          description: 'Complete Outlook Calendar OAuth flow with authorization code.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              code: {
-                type: 'string',
-                description: 'Authorization code from OAuth callback',
-              },
-            },
-            required: ['code'],
-          },
-        },
+        // Outlook temporarily disabled
+        // {
+        //   name: 'configure_outlook_calendar',
+        //   description: 'Start Outlook Calendar OAuth flow. Returns authorization URL.',
+        //   inputSchema: {
+        //     type: 'object',
+        //     properties: {},
+        //   },
+        // },
+        // {
+        //   name: 'outlook_calendar_callback',
+        //   description: 'Complete Outlook Calendar OAuth flow with authorization code.',
+        //   inputSchema: {
+        //     type: 'object',
+        //     properties: {
+        //       code: {
+        //         type: 'string',
+        //         description: 'Authorization code from OAuth callback',
+        //       },
+        //     },
+        //     required: ['code'],
+        //   },
+        // },
         {
           name: 'check_authentication_status',
           description: 'Check which services are currently authenticated.',
           inputSchema: {
             type: 'object',
             properties: {},
+          },
+        },
+        {
+          name: 'authenticate_google',
+          description: 'Authenticate with Google Calendar using automated OAuth flow. Opens browser automatically, captures authorization, and saves tokens. No manual code copying needed!',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+        {
+          name: 'authenticate_gitlab',
+          description: 'Authenticate with GitLab using automated OAuth flow. Opens browser automatically, captures authorization, and saves tokens. No manual code copying needed!',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              gitlab_url: {
+                type: 'string',
+                description: 'GitLab instance URL (optional, defaults to https://gitlab.com)',
+              },
+            },
           },
         },
         {
@@ -198,31 +169,32 @@ class ActivityCollectorMCPServer {
             },
           },
         },
-        {
-          name: 'fetch_github_activity',
-          description: 'Fetch GitHub activity (commits, PRs) for a single date OR a date range. Fast tool that returns immediately. Use this for building custom timesheets.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              date: {
-                type: 'string',
-                description: 'Single date in YYYY-MM-DD format (e.g., "2025-11-27"). Use this OR start_date/end_date, not both.',
-              },
-              start_date: {
-                type: 'string',
-                description: 'Start date for range in YYYY-MM-DD format (e.g., "2025-12-01"). Must be used with end_date.',
-              },
-              end_date: {
-                type: 'string',
-                description: 'End date for range in YYYY-MM-DD format (e.g., "2025-12-05"). Must be used with start_date.',
-              },
-              force_refresh: {
-                type: 'boolean',
-                description: 'Optional. Bypass cache and fetch fresh data. Default: false.',
-              },
-            },
-          },
-        },
+        // GitHub temporarily disabled
+        // {
+        //   name: 'fetch_github_activity',
+        //   description: 'Fetch GitHub activity (commits, PRs) for a single date OR a date range. Fast tool that returns immediately. Use this for building custom timesheets.',
+        //   inputSchema: {
+        //     type: 'object',
+        //     properties: {
+        //       date: {
+        //         type: 'string',
+        //         description: 'Single date in YYYY-MM-DD format (e.g., "2025-11-27"). Use this OR start_date/end_date, not both.',
+        //       },
+        //       start_date: {
+        //         type: 'string',
+        //         description: 'Start date for range in YYYY-MM-DD format (e.g., "2025-12-01"). Must be used with end_date.',
+        //       },
+        //       end_date: {
+        //         type: 'string',
+        //         description: 'End date for range in YYYY-MM-DD format (e.g., "2025-12-05"). Must be used with start_date.',
+        //       },
+        //       force_refresh: {
+        //         type: 'boolean',
+        //         description: 'Optional. Bypass cache and fetch fresh data. Default: false.',
+        //       },
+        //     },
+        //   },
+        // },
         {
           name: 'fetch_google_calendar_events',
           description: 'Fetch Google Calendar events for a single date OR a date range. Fast tool that returns immediately. Use this for building custom timesheets.',
@@ -248,31 +220,32 @@ class ActivityCollectorMCPServer {
             },
           },
         },
-        {
-          name: 'fetch_outlook_calendar_events',
-          description: 'Fetch Outlook Calendar events for a single date OR a date range. Fast tool that returns immediately. Use this for building custom timesheets.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              date: {
-                type: 'string',
-                description: 'Single date in YYYY-MM-DD format (e.g., "2025-11-27"). Use this OR start_date/end_date, not both.',
-              },
-              start_date: {
-                type: 'string',
-                description: 'Start date for range in YYYY-MM-DD format (e.g., "2025-12-01"). Must be used with end_date.',
-              },
-              end_date: {
-                type: 'string',
-                description: 'End date for range in YYYY-MM-DD format (e.g., "2025-12-05"). Must be used with start_date.',
-              },
-              force_refresh: {
-                type: 'boolean',
-                description: 'Optional. Bypass cache and fetch fresh data. Default: false.',
-              },
-            },
-          },
-        },
+        // Outlook temporarily disabled
+        // {
+        //   name: 'fetch_outlook_calendar_events',
+        //   description: 'Fetch Outlook Calendar events for a single date OR a date range. Fast tool that returns immediately. Use this for building custom timesheets.',
+        //   inputSchema: {
+        //     type: 'object',
+        //     properties: {
+        //       date: {
+        //         type: 'string',
+        //         description: 'Single date in YYYY-MM-DD format (e.g., "2025-11-27"). Use this OR start_date/end_date, not both.',
+        //       },
+        //       start_date: {
+        //         type: 'string',
+        //         description: 'Start date for range in YYYY-MM-DD format (e.g., "2025-12-01"). Must be used with end_date.',
+        //       },
+        //       end_date: {
+        //         type: 'string',
+        //         description: 'End date for range in YYYY-MM-DD format (e.g., "2025-12-05"). Must be used with start_date.',
+        //       },
+        //       force_refresh: {
+        //         type: 'boolean',
+        //         description: 'Optional. Bypass cache and fetch fresh data. Default: false.',
+        //       },
+        //     },
+        //   },
+        // },
         {
           name: 'clear_cache',
           description: 'Clear cached timesheet data. Useful when you want to force fresh data fetch for all future requests.',
@@ -295,38 +268,28 @@ class ActivityCollectorMCPServer {
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
         switch (request.params.name) {
-          case 'configure_gitlab':
-            return await this.handleConfigureGitLab(request.params.arguments);
-
-          case 'configure_github':
-            return await this.handleConfigureGitHub(request.params.arguments);
-
-          case 'configure_google_calendar':
-            return await this.handleConfigureGoogleCalendar();
-
-          case 'google_calendar_callback':
-            return await this.handleGoogleCalendarCallback(request.params.arguments);
-
-          case 'configure_outlook_calendar':
-            return await this.handleConfigureOutlookCalendar();
-
-          case 'outlook_calendar_callback':
-            return await this.handleOutlookCalendarCallback(request.params.arguments);
-
           case 'check_authentication_status':
             return await this.handleCheckAuthStatus();
+
+          case 'authenticate_google':
+            return await this.handleAuthenticateGoogle();
+
+          case 'authenticate_gitlab':
+            return await this.handleAuthenticateGitLab(request.params.arguments);
 
           case 'fetch_gitlab_activity':
             return await this.handleFetchGitLabActivity(request.params.arguments);
 
-          case 'fetch_github_activity':
-            return await this.handleFetchGitHubActivity(request.params.arguments);
+          // GitHub temporarily disabled
+          // case 'fetch_github_activity':
+          //   return await this.handleFetchGitHubActivity(request.params.arguments);
 
           case 'fetch_google_calendar_events':
             return await this.handleFetchGoogleCalendarEvents(request.params.arguments);
 
-          case 'fetch_outlook_calendar_events':
-            return await this.handleFetchOutlookCalendarEvents(request.params.arguments);
+          // Outlook temporarily disabled
+          // case 'fetch_outlook_calendar_events':
+          //   return await this.handleFetchOutlookCalendarEvents(request.params.arguments);
 
           case 'clear_cache':
             return await this.handleClearCache(request.params.arguments);
@@ -347,190 +310,19 @@ class ActivityCollectorMCPServer {
     });
   }
 
-  private async handleConfigureGitLab(args: any) {
-    await this.tokenStorage.load();
-    const config = await this.loadConfig();
-
-    const token = args.token;
-    const url = args.url || config.gitlab?.url || 'https://gitlab.com';
-
-    // Test the token
-    await this.gitlab.initialize(token, url);
-
-    // Save token
-    await this.tokenStorage.setGitLabToken(token);
-
-    // Update config
-    if (!config.gitlab) {
-      config.gitlab = { url };
-    } else {
-      config.gitlab.url = url;
-    }
-    await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2));
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: 'GitLab configured successfully!',
-        },
-      ],
-    };
-  }
-
-  private async handleConfigureGitHub(args: any) {
-    await this.tokenStorage.load();
-
-    const token = args.token;
-
-    // Test the token
-    await this.github.initialize(token);
-
-    // Save token
-    await this.tokenStorage.setGitHubToken(token);
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: 'GitHub configured successfully!',
-        },
-      ],
-    };
-  }
-
-  private async handleConfigureGoogleCalendar() {
-    await this.tokenStorage.load();
-    const config = await this.loadConfig();
-
-    if (!config.google) {
-      throw new Error('Google Calendar configuration not found in config file.');
-    }
-
-    await this.googleCalendar.initialize(
-      config.google.clientId,
-      config.google.clientSecret,
-      config.google.redirectUri,
-      undefined,
-      async (refreshedTokens) => {
-        await this.tokenStorage.setGoogleTokens(refreshedTokens);
-      }
-    );
-
-    const authUrl = this.googleCalendar.getAuthUrl();
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: `Please visit this URL to authorize Google Calendar access:\n\n${authUrl}\n\nAfter authorizing, use the 'google_calendar_callback' tool with the authorization code.`,
-        },
-      ],
-    };
-  }
-
-  private async handleGoogleCalendarCallback(args: any) {
-    await this.tokenStorage.load();
-    const config = await this.loadConfig();
-
-    if (!config.google) {
-      throw new Error('Google Calendar configuration not found in config file.');
-    }
-
-    await this.googleCalendar.initialize(
-      config.google.clientId,
-      config.google.clientSecret,
-      config.google.redirectUri,
-      undefined,
-      async (refreshedTokens) => {
-        await this.tokenStorage.setGoogleTokens(refreshedTokens);
-      }
-    );
-
-    const tokens = await this.googleCalendar.setAuthorizationCode(args.code);
-    await this.tokenStorage.setGoogleTokens(tokens);
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: 'Google Calendar configured successfully!',
-        },
-      ],
-    };
-  }
-
-  private async handleConfigureOutlookCalendar() {
-    await this.tokenStorage.load();
-    const config = await this.loadConfig();
-
-    if (!config.outlook) {
-      throw new Error('Outlook Calendar configuration not found in config file.');
-    }
-
-    await this.outlookCalendar.initialize(
-      config.outlook.clientId,
-      config.outlook.clientSecret,
-      config.outlook.tenantId
-    );
-
-    const authUrl = this.outlookCalendar.getAuthUrl(config.outlook.redirectUri);
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: `Please visit this URL to authorize Outlook Calendar access:\n\n${authUrl}\n\nAfter authorizing, use the 'outlook_calendar_callback' tool with the authorization code.`,
-        },
-      ],
-    };
-  }
-
-  private async handleOutlookCalendarCallback(args: any) {
-    await this.tokenStorage.load();
-    const config = await this.loadConfig();
-
-    if (!config.outlook) {
-      throw new Error('Outlook Calendar configuration not found in config file.');
-    }
-
-    await this.outlookCalendar.initialize(
-      config.outlook.clientId,
-      config.outlook.clientSecret,
-      config.outlook.tenantId
-    );
-
-    const tokens = await this.outlookCalendar.setAuthorizationCode(
-      args.code,
-      config.outlook.redirectUri
-    );
-    await this.tokenStorage.setOutlookTokens(tokens);
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: 'Outlook Calendar configured successfully!',
-        },
-      ],
-    };
-  }
-
   private async handleCheckAuthStatus() {
     await this.tokenStorage.load();
 
     const status = {
       gitlab: this.tokenStorage.hasGitLabToken(),
-      github: this.tokenStorage.hasGitHubToken(),
       google: this.tokenStorage.hasGoogleTokens(),
-      outlook: this.tokenStorage.hasOutlookTokens(),
     };
 
     const message = `Authentication Status:
 - GitLab: ${status.gitlab ? '✓ Configured' : '✗ Not configured'}
-- GitHub: ${status.github ? '✓ Configured' : '✗ Not configured'}
 - Google Calendar: ${status.google ? '✓ Configured' : '✗ Not configured'}
-- Outlook Calendar: ${status.outlook ? '✓ Configured' : '✗ Not configured'}`;
+
+Note: Use authenticate_google or authenticate_gitlab for easy setup!`;
 
     return {
       content: [
@@ -540,6 +332,180 @@ class ActivityCollectorMCPServer {
         },
       ],
     };
+  }
+
+  private async handleAuthenticateGoogle() {
+    try {
+      await this.sendProgress('Starting Google Calendar authentication...');
+
+      // Load config to check for custom OAuth credentials
+      let clientId = BUNDLED_OAUTH_CREDENTIALS.google.clientId;
+      let clientSecret = BUNDLED_OAUTH_CREDENTIALS.google.clientSecret;
+
+      try {
+        const config = await this.loadConfig();
+        if (config.google?.clientId && config.google?.clientSecret) {
+          clientId = config.google.clientId;
+          clientSecret = config.google.clientSecret;
+          await this.sendProgress('Using custom OAuth credentials from config');
+        } else {
+          await this.sendProgress('Using bundled OAuth credentials');
+        }
+      } catch (error) {
+        // Config file not found, use bundled credentials
+        await this.sendProgress('Using bundled OAuth credentials');
+      }
+
+      // Run OAuth flow with auto-capture
+      await this.sendProgress('Starting OAuth server...');
+
+      const result = await runOAuthFlow((redirectUri) => {
+        // Create OAuth2 client to generate auth URL
+        const tempOAuth2Client = new (require('google-auth-library').OAuth2)(
+          clientId,
+          clientSecret,
+          redirectUri
+        );
+
+        return tempOAuth2Client.generateAuthUrl({
+          access_type: 'offline',
+          scope: OAUTH_SCOPES.google.calendar,
+          prompt: 'consent',
+        });
+      });
+
+      if (result.error) {
+        throw new Error(`OAuth failed: ${result.error}`);
+      }
+
+      if (!result.code) {
+        throw new Error('No authorization code received');
+      }
+
+      await this.sendProgress('Authorization code received, exchanging for tokens...');
+
+      // Exchange code for tokens
+      const redirectUri = `http://localhost:${result.port}/callback`;
+      await this.googleCalendar.initialize(clientId, clientSecret, redirectUri);
+      const tokens = await this.googleCalendar.setAuthorizationCode(result.code);
+
+      // Save tokens
+      await this.tokenStorage.load();
+      await this.tokenStorage.setGoogleTokens(tokens);
+      await this.sendProgress('Tokens saved successfully!');
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `✅ Successfully authenticated with Google Calendar!
+
+Your access token has been saved and will be automatically refreshed when needed.
+You can now use fetch_google_calendar_events to retrieve calendar data.`,
+          },
+        ],
+      };
+    } catch (error: any) {
+      await this.sendProgress(`Authentication failed: ${error.message}`, 'error');
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `❌ Google Calendar authentication failed: ${error.message}
+
+Please try again. If the problem persists, check that:
+1. Your browser allows opening localhost URLs
+2. Ports 8080-8090 are not all blocked by firewall
+3. You authorized the application in the browser`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+
+  private async handleAuthenticateGitLab(args: any) {
+    try {
+      const gitlabUrl = args?.gitlab_url || 'https://gitlab.com';
+
+      await this.sendProgress(`Starting GitLab authentication for ${gitlabUrl}...`);
+
+      // Get OAuth credentials
+      const applicationId = BUNDLED_OAUTH_CREDENTIALS.gitlab.applicationId;
+      const secret = BUNDLED_OAUTH_CREDENTIALS.gitlab.secret;
+
+      await this.sendProgress('Using bundled OAuth credentials');
+
+      // Create GitLab OAuth helper
+      const gitlabOAuth = new GitLabOAuth({
+        applicationId,
+        secret,
+        gitlabUrl,
+      });
+
+      // Run OAuth flow with auto-capture
+      await this.sendProgress('Starting OAuth server...');
+
+      const result = await runOAuthFlow((redirectUri) => {
+        return gitlabOAuth.getAuthUrl(redirectUri, OAUTH_SCOPES.gitlab.api);
+      });
+
+      if (result.error) {
+        throw new Error(`OAuth failed: ${result.error}`);
+      }
+
+      if (!result.code) {
+        throw new Error('No authorization code received');
+      }
+
+      await this.sendProgress('Authorization code received, exchanging for tokens...');
+
+      // Exchange code for tokens
+      const redirectUri = `http://localhost:${result.port}/callback`;
+      const tokens = await gitlabOAuth.getTokenFromCode(result.code, redirectUri);
+
+      // Save tokens
+      await this.tokenStorage.load();
+      await this.tokenStorage.setGitLabOAuthTokens({
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        created_at: tokens.created_at,
+        expires_in: tokens.expires_in,
+      });
+      await this.sendProgress('Tokens saved successfully!');
+
+      // Initialize GitLab integration
+      await this.gitlab.initialize(tokens.access_token, gitlabUrl);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `✅ Successfully authenticated with GitLab (${gitlabUrl})!
+
+Your access token has been saved and will be automatically refreshed when needed.
+You can now use fetch_gitlab_activity to retrieve your GitLab activity.`,
+          },
+        ],
+      };
+    } catch (error: any) {
+      await this.sendProgress(`Authentication failed: ${error.message}`, 'error');
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `❌ GitLab authentication failed: ${error.message}
+
+Please try again. If the problem persists, check that:
+1. Your browser allows opening localhost URLs
+2. Ports 8080-8090 are not all blocked by firewall
+3. You authorized the application in the browser
+4. The GitLab URL is correct (${args?.gitlab_url || 'https://gitlab.com'})`,
+          },
+        ],
+        isError: true,
+      };
+    }
   }
 
   private async handleClearCache(args: any) {
