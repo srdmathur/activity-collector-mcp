@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { homedir } from 'os';
-import { GitLabActivity, CalendarEvent } from '../types/index.js';
+import { GitLabActivity, CalendarEvent, AzureDevOpsActivity } from '../types/index.js';
 
 const CACHE_FILE = path.join(homedir(), '.activity-collector-mcp-cache.json');
 const DEFAULT_CACHE_TTL = 3600000; // 1 hour in milliseconds
@@ -22,6 +22,9 @@ interface CacheData {
   outlookCalendar: {
     [dateKey: string]: CacheEntry<CalendarEvent[]>;
   };
+  azureDevops: {
+    [dateKey: string]: CacheEntry<AzureDevOpsActivity>;
+  };
 }
 
 export class ActivityCache {
@@ -29,6 +32,7 @@ export class ActivityCache {
     gitlab: {},
     googleCalendar: {},
     outlookCalendar: {},
+    azureDevops: {},
   };
   private cacheTTL: number = DEFAULT_CACHE_TTL;
   private cacheStats = {
@@ -38,18 +42,29 @@ export class ActivityCache {
     googleMisses: 0,
     outlookHits: 0,
     outlookMisses: 0,
+    azureDevopsHits: 0,
+    azureDevopsMisses: 0,
   };
 
   async load(): Promise<void> {
     try {
       const data = await fs.readFile(CACHE_FILE, 'utf-8');
-      this.cache = JSON.parse(data);
+      const parsed = JSON.parse(data);
+      // Cache files written before a bucket existed lack that key entirely,
+      // so default every bucket rather than trusting the file's shape.
+      this.cache = {
+        gitlab: parsed.gitlab ?? {},
+        googleCalendar: parsed.googleCalendar ?? {},
+        outlookCalendar: parsed.outlookCalendar ?? {},
+        azureDevops: parsed.azureDevops ?? {},
+      };
     } catch (error) {
       // Cache file doesn't exist yet, that's okay
       this.cache = {
         gitlab: {},
         googleCalendar: {},
         outlookCalendar: {},
+        azureDevops: {},
       };
     }
   }
@@ -158,15 +173,51 @@ export class ActivityCache {
     await this.save();
   }
 
+  // Azure DevOps cache methods
+  getAzureDevOpsActivity(date: Date): AzureDevOpsActivity | null {
+    const key = this.getDateKey(date);
+    const entry = this.cache.azureDevops[key];
+
+    if (!entry) {
+      this.cacheStats.azureDevopsMisses++;
+      return null;
+    }
+
+    if (this.isExpired(entry.timestamp)) {
+      delete this.cache.azureDevops[key];
+      this.cacheStats.azureDevopsMisses++;
+      return null;
+    }
+
+    this.cacheStats.azureDevopsHits++;
+    return entry.data;
+  }
+
+  async setAzureDevOpsActivity(date: Date, activity: AzureDevOpsActivity): Promise<void> {
+    const key = this.getDateKey(date);
+    this.cache.azureDevops[key] = {
+      data: activity,
+      timestamp: Date.now(),
+      source: 'azure_devops',
+    };
+    await this.save();
+  }
+
   // Cache management
   async clearAll(): Promise<void> {
     this.cache = {
       gitlab: {},
       googleCalendar: {},
       outlookCalendar: {},
+      azureDevops: {},
     };
     await this.save();
     this.resetStats();
+  }
+
+  async clearAzureDevOps(): Promise<void> {
+    this.cache.azureDevops = {};
+    await this.save();
   }
 
   async clearGitLab(): Promise<void> {
@@ -204,15 +255,24 @@ export class ActivityCache {
       }
     }
 
+    // Clear expired Azure DevOps entries
+    for (const [key, entry] of Object.entries(this.cache.azureDevops)) {
+      if (now - entry.timestamp > this.cacheTTL) {
+        delete this.cache.azureDevops[key];
+      }
+    }
+
     await this.save();
   }
 
   getCacheStats() {
     const total = this.cacheStats.gitlabHits + this.cacheStats.gitlabMisses +
                   this.cacheStats.googleHits + this.cacheStats.googleMisses +
-                  this.cacheStats.outlookHits + this.cacheStats.outlookMisses;
+                  this.cacheStats.outlookHits + this.cacheStats.outlookMisses +
+                  this.cacheStats.azureDevopsHits + this.cacheStats.azureDevopsMisses;
 
-    const hits = this.cacheStats.gitlabHits + this.cacheStats.googleHits + this.cacheStats.outlookHits;
+    const hits = this.cacheStats.gitlabHits + this.cacheStats.googleHits +
+                 this.cacheStats.outlookHits + this.cacheStats.azureDevopsHits;
     const hitRate = total > 0 ? ((hits / total) * 100).toFixed(1) : '0';
 
     return {
@@ -231,6 +291,8 @@ export class ActivityCache {
       googleMisses: 0,
       outlookHits: 0,
       outlookMisses: 0,
+      azureDevopsHits: 0,
+      azureDevopsMisses: 0,
     };
   }
 
@@ -239,6 +301,7 @@ export class ActivityCache {
       gitlabEntries: Object.keys(this.cache.gitlab).length,
       googleCalendarEntries: Object.keys(this.cache.googleCalendar).length,
       outlookCalendarEntries: Object.keys(this.cache.outlookCalendar).length,
+      azureDevopsEntries: Object.keys(this.cache.azureDevops).length,
       cacheTTL: this.cacheTTL,
       cacheFile: CACHE_FILE,
     };

@@ -12,6 +12,8 @@ import { GitLabIntegration } from './integrations/gitlab.js';
 import { GitHubIntegration } from './integrations/github.js';
 import { GoogleCalendarIntegration } from './integrations/googleCalendar.js';
 import { OutlookCalendarIntegration } from './integrations/outlookCalendar.js';
+import { OutlookLocalIntegration } from './integrations/outlookLocal.js';
+import { AzureDevOpsIntegration, azSetupInstructions } from './integrations/azureDevOps.js';
 import { TokenStorage } from './utils/tokenStorage.js';
 import { ActivityCache } from './utils/cache.js';
 import { Config, DayActivity } from './types/index.js';
@@ -31,6 +33,8 @@ class ActivityCollectorMCPServer {
   private github: GitHubIntegration;
   private googleCalendar: GoogleCalendarIntegration;
   private outlookCalendar: OutlookCalendarIntegration;
+  private outlookLocal: OutlookLocalIntegration;
+  private azureDevOps: AzureDevOpsIntegration;
   private tokenStorage: TokenStorage;
   private activityCache: ActivityCache;
   private config: Config | null = null;
@@ -70,6 +74,8 @@ class ActivityCollectorMCPServer {
     this.github = new GitHubIntegration();
     this.googleCalendar = new GoogleCalendarIntegration();
     this.outlookCalendar = new OutlookCalendarIntegration();
+    this.outlookLocal = new OutlookLocalIntegration();
+    this.azureDevOps = new AzureDevOpsIntegration();
     this.tokenStorage = new TokenStorage();
     this.activityCache = new ActivityCache();
 
@@ -288,6 +294,85 @@ class ActivityCollectorMCPServer {
         //   },
         // },
         {
+          name: 'configure_azure_devops',
+          description:
+            'Configure Azure DevOps. No personal access token is required - authentication uses the Azure CLI (az login), and no secret is stored. Validates the connection and reports which projects are visible. Re-run with a projects list to narrow which projects are scanned.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              organization: {
+                type: 'string',
+                description:
+                  'Azure DevOps organization name - the segment after dev.azure.com/ in your browser URL (e.g. "mycompany").',
+              },
+              projects: {
+                type: 'array',
+                items: { type: 'string' },
+                description:
+                  'Optional. Limit activity fetching to these project names. Omit to scan every visible project, which is slower.',
+              },
+              tenant: {
+                type: 'string',
+                description:
+                  'Optional. Entra tenant ID, needed only when the Azure DevOps organization lives in a different tenant than your default az login.',
+              },
+            },
+            required: ['organization'],
+          },
+        },
+        {
+          name: 'fetch_azure_devops_activity',
+          description:
+            'Fetch Azure DevOps activity (work items, pull requests, commits) for a single date OR a date range. Requires configure_azure_devops first.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              date: {
+                type: 'string',
+                description: 'Single date in YYYY-MM-DD format. Use this OR start_date/end_date, not both.',
+              },
+              start_date: {
+                type: 'string',
+                description: 'Start date for range in YYYY-MM-DD format. Must be used with end_date.',
+              },
+              end_date: {
+                type: 'string',
+                description: 'End date for range in YYYY-MM-DD format. Must be used with start_date.',
+              },
+              force_refresh: {
+                type: 'boolean',
+                description: 'Optional. Bypass cache and fetch fresh data. Default: false.',
+              },
+            },
+          },
+        },
+        {
+          name: 'fetch_outlook_calendar_events',
+          description:
+            'Fetch Outlook Calendar events for a single date OR a date range by reading the locally installed Outlook desktop client. Requires no authentication or setup. Windows requires classic Outlook (the "new Outlook" app does not support automation); macOS requires Outlook for Mac.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              date: {
+                type: 'string',
+                description: 'Single date in YYYY-MM-DD format. Use this OR start_date/end_date, not both.',
+              },
+              start_date: {
+                type: 'string',
+                description: 'Start date for range in YYYY-MM-DD format. Must be used with end_date.',
+              },
+              end_date: {
+                type: 'string',
+                description: 'End date for range in YYYY-MM-DD format. Must be used with start_date.',
+              },
+              force_refresh: {
+                type: 'boolean',
+                description: 'Optional. Bypass cache and fetch fresh data. Default: false.',
+              },
+            },
+          },
+        },
+        {
           name: 'clear_cache',
           description: 'Clear cached timesheet data. Useful when you want to force fresh data fetch for all future requests.',
           inputSchema: {
@@ -296,7 +381,7 @@ class ActivityCollectorMCPServer {
               scope: {
                 type: 'string',
                 description:
-                  'Optional. What to clear: "all" (everything), "gitlab", "calendars", or "expired" (only expired entries). Default: "all".',
+                  'Optional. What to clear: "all" (everything), "gitlab", "calendars", "azure_devops", or "expired" (only expired entries). Default: "all".',
               },
             },
           },
@@ -338,6 +423,15 @@ class ActivityCollectorMCPServer {
           // case 'fetch_outlook_calendar_events':
           //   return await this.handleFetchOutlookCalendarEvents(request.params.arguments);
 
+          case 'configure_azure_devops':
+            return await this.handleConfigureAzureDevOps(request.params.arguments);
+
+          case 'fetch_azure_devops_activity':
+            return await this.handleFetchAzureDevOpsActivity(request.params.arguments);
+
+          case 'fetch_outlook_calendar_events':
+            return await this.handleFetchOutlookLocalEvents(request.params.arguments);
+
           case 'clear_cache':
             return await this.handleClearCache(request.params.arguments);
 
@@ -360,22 +454,57 @@ class ActivityCollectorMCPServer {
   private async handleCheckAuthStatus() {
     await this.tokenStorage.load();
 
-    const status = {
-      gitlab: this.tokenStorage.hasGitLabToken(),
-      google: this.tokenStorage.hasGoogleTokens(),
-    };
+    const lines: string[] = ['Authentication Status:'];
 
-    const message = `Authentication Status:
-- GitLab: ${status.gitlab ? '✓ Configured' : '✗ Not configured'}
-- Google Calendar: ${status.google ? '✓ Configured' : '✗ Not configured'}
+    lines.push(
+      `- GitLab: ${this.tokenStorage.hasGitLabToken() ? '✓ Configured' : '✗ Not configured — use start_gitlab_auth'}`
+    );
+    lines.push(
+      `- Google Calendar: ${this.tokenStorage.hasGoogleTokens() ? '✓ Configured' : '✗ Not configured — use start_google_auth'}`
+    );
 
-Note: Use authenticate_google or authenticate_gitlab for easy setup!`;
+    // Outlook needs no credential at all, so the only question is whether this
+    // platform has a local bridge available.
+    if (OutlookLocalIntegration.isSupported()) {
+      lines.push('- Outlook Calendar: ✓ Available (reads local Outlook desktop, no setup required)');
+      if (process.platform === 'win32') {
+        lines.push(
+          '    Requires classic Outlook. The "new Outlook" app cannot be automated — if fetches fail,'
+        );
+        lines.push('    turn off the "New Outlook" toggle in Outlook and reopen it.');
+      }
+    } else {
+      lines.push(`- Outlook Calendar: ✗ Unsupported platform (${process.platform})`);
+      lines.push('    ' + OutlookLocalIntegration.unsupportedMessage().split('\n').join('\n    '));
+    }
+
+    const ado = this.tokenStorage.getAzureDevOps();
+    if (ado?.organization) {
+      const scope = ado.projects?.length
+        ? `projects: ${ado.projects.join(', ')}`
+        : 'all visible projects (slower — narrow with configure_azure_devops)';
+      lines.push(`- Azure DevOps: ✓ Configured (org: ${ado.organization}, ${scope})`);
+      if (ado.tenant) lines.push(`    tenant: ${ado.tenant}`);
+    } else {
+      lines.push('- Azure DevOps: ✗ Not configured');
+      lines.push('    ' + azSetupInstructions().split('\n').join('\n    '));
+      lines.push('    Then run configure_azure_devops with your organization name.');
+    }
+
+    // Jira is deliberately not implemented here: it is served by the Atlassian
+    // MCP, which this server cannot call. An MCP server has no visibility into
+    // which other servers the client has loaded, so this notice is
+    // unconditional rather than a detected state.
+    lines.push('- Jira: ⓘ Provided by the Atlassian MCP, not by this server.');
+    lines.push('    If Jira tools are unavailable, install the Atlassian MCP:');
+    lines.push('      claude mcp add --transport sse atlassian https://mcp.atlassian.com/v1/sse');
+    lines.push('    then authorise in the browser when prompted.');
 
     return {
       content: [
         {
           type: 'text',
-          text: message,
+          text: lines.join('\n'),
         },
       ],
     };
@@ -658,6 +787,12 @@ If the error mentions "redirect_uri_mismatch", the OAuth app may need to be reco
         await this.activityCache.clearCalendars();
         message = 'Calendar caches cleared successfully.';
         break;
+      case 'azure_devops':
+      case 'azuredevops':
+      case 'ado':
+        await this.activityCache.clearAzureDevOps();
+        message = 'Azure DevOps cache cleared successfully.';
+        break;
       case 'expired':
         await this.activityCache.clearExpired();
         message = 'Expired cache entries cleared successfully.';
@@ -670,7 +805,7 @@ If the error mentions "redirect_uri_mismatch", the OAuth app may need to be reco
     }
 
     const info = this.activityCache.getCacheInfo();
-    message += `\n\nCache Status:\n- GitLab entries: ${info.gitlabEntries}\n- Google Calendar entries: ${info.googleCalendarEntries}\n- Outlook Calendar entries: ${info.outlookCalendarEntries}`;
+    message += `\n\nCache Status:\n- GitLab entries: ${info.gitlabEntries}\n- Google Calendar entries: ${info.googleCalendarEntries}\n- Outlook Calendar entries: ${info.outlookCalendarEntries}\n- Azure DevOps entries: ${info.azureDevopsEntries}`;
 
     return {
       content: [
@@ -1624,6 +1759,336 @@ ${dateEntries}`,
         calendar: calendarCached,
       },
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Azure DevOps
+  // -------------------------------------------------------------------------
+
+  private async handleConfigureAzureDevOps(args: any) {
+    const organization = args?.organization;
+    if (!organization || typeof organization !== 'string') {
+      throw new Error('organization is required (the segment after dev.azure.com/ in your browser URL)');
+    }
+
+    const projects = Array.isArray(args?.projects)
+      ? args.projects.filter((p: unknown) => typeof p === 'string' && p.trim() !== '')
+      : undefined;
+    const tenant = typeof args?.tenant === 'string' && args.tenant.trim() !== '' ? args.tenant : undefined;
+
+    await this.azureDevOps.initialize({ organization, projects, tenant });
+
+    // Validate before saving so a bad organization name is never persisted.
+    const { identity, projects: visible } = await this.azureDevOps.validate();
+
+    await this.tokenStorage.load();
+    await this.tokenStorage.setAzureDevOps({ organization, projects, tenant });
+
+    const lines = [
+      `✅ Azure DevOps configured for organization "${organization}"`,
+      '',
+      `Authenticated as: ${identity.displayName}${identity.email ? ` <${identity.email}>` : ''}`,
+      `Projects visible: ${visible.length}`,
+    ];
+
+    if (visible.length > 0) {
+      lines.push(`  ${visible.slice(0, 25).join(', ')}${visible.length > 25 ? ', …' : ''}`);
+    }
+
+    if (projects?.length) {
+      lines.push('', `Scanning limited to: ${projects.join(', ')}`);
+      const unknown = projects.filter((p: string) => !visible.includes(p));
+      if (unknown.length > 0) {
+        lines.push(`⚠ Not found among visible projects: ${unknown.join(', ')}`);
+      }
+    } else if (visible.length > 3) {
+      lines.push(
+        '',
+        `⚠ No project scope set, so commit fetching will sweep all ${visible.length} projects and will be slow.`,
+        '  Narrow it by re-running configure_azure_devops with a projects list.'
+      );
+    }
+
+    if (!identity.email) {
+      lines.push(
+        '',
+        '⚠ No account email resolved, so commit lookups will be skipped (commit search matches on author alias).'
+      );
+    }
+
+    lines.push('', 'No token was stored — access is minted on demand via the Azure CLI.');
+
+    return { content: [{ type: 'text', text: lines.join('\n') }] };
+  }
+
+  private async ensureAzureDevOpsReady(): Promise<void> {
+    await this.tokenStorage.load();
+    const settings = this.tokenStorage.getAzureDevOps();
+    if (!settings?.organization) {
+      throw new Error(
+        `Azure DevOps not configured.\n\n${azSetupInstructions()}\n\nThen run configure_azure_devops with your organization name.`
+      );
+    }
+    await this.azureDevOps.initialize(settings);
+  }
+
+  private formatAzureDevOpsActivity(activity: any): string {
+    const parts: string[] = [];
+
+    parts.push(`**Work Items (${activity.workItems.length}):**`);
+    parts.push(
+      activity.workItems.length > 0
+        ? activity.workItems
+            .map((w: any) => {
+              const transition =
+                w.stateTo && w.stateFrom
+                  ? ` (${w.stateFrom} → ${w.stateTo})`
+                  : w.stateTo
+                    ? ` (→ ${w.stateTo})`
+                    : '';
+              return `  - [${w.actions.join(', ')}] ${w.type} #${w.id}: ${w.title}${transition} in ${w.project}`;
+            })
+            .join('\n')
+        : '  (none)'
+    );
+
+    parts.push('');
+    parts.push(`**Pull Requests (${activity.pullRequests.length}):**`);
+    parts.push(
+      activity.pullRequests.length > 0
+        ? activity.pullRequests
+            .map((pr: any) => `  - ${pr.action}: ${pr.title} (#${pr.id}) in ${pr.repository}/${pr.project}`)
+            .join('\n')
+        : '  (none)'
+    );
+
+    parts.push('');
+    parts.push(`**Commits (${activity.commits.length}):**`);
+    parts.push(
+      activity.commits.length > 0
+        ? activity.commits.map((c: any) => `  - ${c.message} (${c.repository})`).join('\n')
+        : '  (none)'
+    );
+
+    // Never let a partial sweep look like full coverage.
+    const scanned = activity.scanned;
+    parts.push('');
+    parts.push(
+      `ℹ Scanned ${scanned.projects.length} project(s), ${scanned.repositories} repositor${scanned.repositories === 1 ? 'y' : 'ies'}.` +
+        (scanned.commitsSkipped ? ' Commits skipped (no account email resolved).' : '')
+    );
+
+    return parts.join('\n');
+  }
+
+  private async fetchAzureDevOpsWithCache(
+    dateStr: string,
+    forceRefresh: boolean
+  ): Promise<{ activity: any; fromCache: boolean }> {
+    const [year, month, day] = dateStr.split('-').map(Number);
+    const date = new Date(year, month - 1, day);
+
+    if (!forceRefresh) {
+      const cached = this.activityCache.getAzureDevOpsActivity(date);
+      if (cached) {
+        await this.sendProgress(`✓ Azure DevOps (${dateStr}) - from cache`);
+        return { activity: cached, fromCache: true };
+      }
+    }
+
+    await this.sendProgress(`⏳ Fetching Azure DevOps activity for ${dateStr}...`);
+    const activity = await this.azureDevOps.getActivityForDate(dateStr);
+    await this.activityCache.setAzureDevOpsActivity(date, activity);
+    await this.sendProgress(
+      `✓ Azure DevOps (${dateStr}) - ${activity.workItems.length} work items, ${activity.pullRequests.length} PRs, ${activity.commits.length} commits`
+    );
+    return { activity, fromCache: false };
+  }
+
+  private async handleFetchAzureDevOpsActivity(args: any) {
+    await this.activityCache.load();
+    await this.ensureAzureDevOpsReady();
+
+    const forceRefresh = args?.force_refresh ?? false;
+    const dates = this.resolveDateArgs(args);
+
+    if (dates.length === 1) {
+      const dateStr = dates[0];
+      const { activity, fromCache } = await this.fetchAzureDevOpsWithCache(dateStr, forceRefresh);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `✅ Azure DevOps activity for ${dateStr} ${fromCache ? '📋 (from cache)' : '🔄 (fresh)'}\n\n${this.formatAzureDevOpsActivity(activity)}`,
+          },
+        ],
+      };
+    }
+
+    const sections: string[] = [];
+    let totalWorkItems = 0;
+    let totalPRs = 0;
+    let totalCommits = 0;
+
+    for (const dateStr of dates) {
+      const { activity } = await this.fetchAzureDevOpsWithCache(dateStr, forceRefresh);
+      totalWorkItems += activity.workItems.length;
+      totalPRs += activity.pullRequests.length;
+      totalCommits += activity.commits.length;
+
+      if (
+        activity.workItems.length === 0 &&
+        activity.pullRequests.length === 0 &&
+        activity.commits.length === 0
+      ) {
+        sections.push(`📅 **${dateStr}**\n  - No activity`);
+      } else {
+        sections.push(`📅 **${dateStr}**\n\n${this.formatAzureDevOpsActivity(activity)}`);
+      }
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text:
+            `✅ Azure DevOps activity for ${dates[0]} to ${dates[dates.length - 1]}\n\n` +
+            `**Summary:**\n- Total Work Items: ${totalWorkItems}\n- Total Pull Requests: ${totalPRs}\n- Total Commits: ${totalCommits}\n\n` +
+            `**Activity by Date:**\n${sections.join('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n')}`,
+        },
+      ],
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Outlook (local desktop client)
+  // -------------------------------------------------------------------------
+
+  private formatCalendarEvents(events: any[]): string {
+    if (events.length === 0) return '  (none)';
+    return events
+      .map((e: any) => {
+        const start = new Date(e.start);
+        const end = new Date(e.end);
+        const hhmm = (d: Date) =>
+          `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+        const attendees = e.attendees ? ` (${e.attendees} attendees)` : '';
+        return `  - ${hhmm(start)}-${hhmm(end)}  ${e.title}${attendees}`;
+      })
+      .join('\n');
+  }
+
+  private async fetchOutlookLocalWithCache(
+    dateStr: string,
+    forceRefresh: boolean
+  ): Promise<{ events: any[]; fromCache: boolean }> {
+    const [year, month, day] = dateStr.split('-').map(Number);
+    const date = new Date(year, month - 1, day);
+
+    if (!forceRefresh) {
+      const cached = this.activityCache.getOutlookCalendarEvents(date);
+      if (cached) {
+        await this.sendProgress(`✓ Outlook Calendar (${dateStr}) - from cache`);
+        return { events: cached, fromCache: true };
+      }
+    }
+
+    await this.sendProgress(`⏳ Reading local Outlook calendar for ${dateStr}...`);
+    const events = await this.outlookLocal.getEventsForDate(dateStr);
+    await this.activityCache.setOutlookCalendarEvents(date, events);
+    await this.sendProgress(`✓ Outlook Calendar (${dateStr}) - ${events.length} events`);
+    return { events, fromCache: false };
+  }
+
+  private async handleFetchOutlookLocalEvents(args: any) {
+    await this.activityCache.load();
+
+    if (!OutlookLocalIntegration.isSupported()) {
+      throw new Error(OutlookLocalIntegration.unsupportedMessage());
+    }
+
+    const forceRefresh = args?.force_refresh ?? false;
+    const dates = this.resolveDateArgs(args);
+
+    if (dates.length === 1) {
+      const dateStr = dates[0];
+      const { events, fromCache } = await this.fetchOutlookLocalWithCache(dateStr, forceRefresh);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `✅ Outlook Calendar events for ${dateStr} ${fromCache ? '📋 (from cache)' : '🔄 (fresh)'}\n\n**Calendar Events (${events.length}):**\n${this.formatCalendarEvents(events)}`,
+          },
+        ],
+      };
+    }
+
+    const sections: string[] = [];
+    let total = 0;
+
+    for (const dateStr of dates) {
+      const { events } = await this.fetchOutlookLocalWithCache(dateStr, forceRefresh);
+      total += events.length;
+      sections.push(
+        events.length === 0
+          ? `📅 **${dateStr}**\n  - No events`
+          : `📅 **${dateStr}**\n\n**Calendar Events (${events.length}):**\n${this.formatCalendarEvents(events)}`
+      );
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text:
+            `✅ Outlook Calendar events for ${dates[0]} to ${dates[dates.length - 1]}\n\n` +
+            `**Summary:**\n- Total Events: ${total}\n\n` +
+            `**Events by Date:**\n${sections.join('\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n')}`,
+        },
+      ],
+    };
+  }
+
+  /**
+   * Normalises the `date` / `start_date`+`end_date` argument pair into an
+   * inclusive list of YYYY-MM-DD strings, matching the existing fetch tools.
+   */
+  private resolveDateArgs(args: any): string[] {
+    const isValid = (s: unknown): s is string => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
+
+    if (args?.start_date && args?.end_date) {
+      if (!isValid(args.start_date) || !isValid(args.end_date)) {
+        throw new Error('Invalid date format. Use YYYY-MM-DD format ONLY (e.g., "2025-11-27")');
+      }
+
+      const [sy, sm, sd] = args.start_date.split('-').map(Number);
+      const [ey, em, ed] = args.end_date.split('-').map(Number);
+      const start = new Date(sy, sm - 1, sd);
+      const end = new Date(ey, em - 1, ed);
+
+      if (start > end) {
+        throw new Error('start_date must be before or equal to end_date');
+      }
+
+      const out: string[] = [];
+      const cursor = new Date(start);
+      while (cursor <= end) {
+        out.push(
+          `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}-${String(cursor.getDate()).padStart(2, '0')}`
+        );
+        cursor.setDate(cursor.getDate() + 1);
+      }
+      return out;
+    }
+
+    if (args?.date) {
+      if (!isValid(args.date)) {
+        throw new Error('Invalid date format. Use YYYY-MM-DD format ONLY (e.g., "2025-11-27")');
+      }
+      return [args.date];
+    }
+
+    throw new Error('Either date OR start_date+end_date must be provided');
   }
 
   async run() {
