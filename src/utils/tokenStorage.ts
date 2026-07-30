@@ -80,6 +80,19 @@ export class TokenStorage {
     await this.save();
   }
 
+  getAzureDevOps(): TokenStore['azureDevops'] | undefined {
+    return this.tokens.azureDevops;
+  }
+
+  async setAzureDevOps(settings: TokenStore['azureDevops']): Promise<void> {
+    this.tokens.azureDevops = settings;
+    await this.save();
+  }
+
+  hasAzureDevOps(): boolean {
+    return !!this.tokens.azureDevops?.organization;
+  }
+
   async clearAll(): Promise<void> {
     this.tokens = {};
     await this.save();

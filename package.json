@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "test": "node --test build/tests/mappers.test.js",
     "watch": "tsc --watch",
     "dev": "npm run build && node build/index.js",
     "prepare": "npm run build"
